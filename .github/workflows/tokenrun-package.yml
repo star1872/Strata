@@ -9,6 +9,9 @@ on:
   push:
     branches: [oldhw]
 
+permissions:
+  contents: write                                 # the release tokenrun-latest
+
 jobs:
   windows:
     runs-on: windows-2022
