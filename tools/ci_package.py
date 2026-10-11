@@ -11,6 +11,13 @@
         downloads do not: the model repository MODELSCOPE_REPO (setup.py's MS_ENGINE_REPO), each archive at
         oldhw-v<version>/<name>, with the token MODELSCOPE_TOKEN (a write token from modelscope.cn/my/myaccesstoken).
         Without the token it says so and does nothing (forks without it still build).
+    python tools/ci_package.py llama-mirror
+        the official llama.cpp builds the llama.cpp backend installs (serve/llama_models.py LLAMA_BUILD, every
+        archive engine_assets() names for Windows and Linux) copied from ggml-org's GitHub release to the same
+        ModelScope repository as llama.cpp/<build>/<archive>; archives already there are skipped.
+    python tools/ci_package.py tokenrun dist/TokenRun-windows-x64.zip dist/TokenRun-linux-x64.tar.gz install.sh
+        TokenRun's ready-to-run packages (tools/package_portable.py) at the top of the ModelScope repository
+        TOKENRUN_MS_REPO (default mymodel3861/TokenRun, created when missing), with its README.
 """
 from __future__ import annotations
 
@@ -84,14 +91,17 @@ def package(exe: Path, vision: Path | None, out: Path) -> None:
     print(f"-> {out} ({out.stat().st_size / 1e6:.1f} MB)")
 
 
-MS_README = """# Strata engine (fork 1872183316/Strata, branch oldhw)
+MS_README = """# Strata engine (fork star1872/Strata, branch oldhw)
 
-A copy of the ready-made engine archives of https://github.com/1872183316/Strata/releases (release oldhw-v<version>),
+A copy of the ready-made engine archives of https://github.com/star1872/Strata/releases (release oldhw-v<version>),
 for PCs that reach ModelScope but not GitHub's downloads.  setup.py downloads them from here by itself; there is no
 need to download them by hand.  Built by GitHub Actions from the fork's sources (STRATA_PORTABLE, CUDA 13.0,
 RTX 20/30/40/50); each archive's BUILD.json names the commit.
 
 Strata: https://github.com/Niko1221/Strata (MIT)
+
+llama.cpp/<build>/: the official llama.cpp builds (https://github.com/ggml-org/llama.cpp/releases, MIT; each archive
+carries its license) for the fork's llama.cpp backend (serve/llama_models.py), copied unchanged.
 """
 
 
@@ -106,7 +116,7 @@ def modelscope(files: list[Path]) -> None:
     api.login(token)
     if not api.repo_exists(repo, "model"):
         api.create_repo(repo, "model", visibility="public", license="mit",
-                        description="Ready-made Strata engine (fork 1872183316/Strata, branch oldhw)")
+                        description="Ready-made Strata engine (fork star1872/Strata, branch oldhw)")
         print(f"created {repo}")
     api.upload_file(repo, "model", MS_README.encode(), "README.md", commit_message="README", disable_tqdm=True)
     tag = f"oldhw-v{version()}"
@@ -117,9 +127,119 @@ def modelscope(files: list[Path]) -> None:
         print(f"-> {repo}/{tag}/{f.name} ({f.stat().st_size / 1e6:.1f} MB)", flush=True)
 
 
+def ms_api():
+    token = os.environ.get("MODELSCOPE_TOKEN", "").strip()
+    repo = os.environ.get("MODELSCOPE_REPO", "").strip()
+    if not token or not repo:
+        print("MODELSCOPE_TOKEN or MODELSCOPE_REPO is not set: no copy on ModelScope")
+        return None, None
+    from modelscope_hub.api import HubApi
+    api = HubApi(token=token)
+    api.login(token)
+    return api, repo
+
+
+def llama_assets() -> tuple[str, list[str]]:
+    """The pinned llama.cpp build and every archive serve/llama_models.py may download, Windows and Linux."""
+    import sys
+    sys.path.insert(0, str(ROOT))
+    from serve import llama_models as LM
+    names = []
+    for win in (True, False):
+        LM.WIN = win
+        for kind in ("cuda13", "cuda12", "vulkan", "cpu"):
+            names += [n for n in LM.engine_assets(kind) if n not in names]
+    return LM.LLAMA_BUILD, names
+
+
+def llama_mirror() -> None:
+    api, repo = ms_api()
+    if api is None:
+        return
+    build, names = llama_assets()
+    have = {f.path: f.size for f in api.list_repo_files(repo, "model", recursive=True)}
+    api.upload_file(repo, "model", MS_README.encode(), "README.md", commit_message="README", disable_tqdm=True)
+    for name in names:
+        path = f"llama.cpp/{build}/{name}"
+        if have.get(path):
+            print(f"= {path} (already there)", flush=True)
+            continue
+        url = f"https://github.com/ggml-org/llama.cpp/releases/download/{build}/{name}"
+        tmp = ROOT / "_mirror.tmp"
+        req = urllib.request.Request(url, headers={"User-Agent": "strata-ci"})
+        with urllib.request.urlopen(req, timeout=600) as r, open(tmp, "wb") as f:
+            shutil.copyfileobj(r, f, 8 << 20)
+        api.upload_file(repo, "model", str(tmp), path, commit_message=f"llama.cpp {build} {name}", disable_tqdm=True)
+        print(f"-> {repo}/{path} ({tmp.stat().st_size / 1e6:.1f} MB)", flush=True)
+        tmp.unlink()
+
+
+TOKENRUN_MS_README = """---
+license: mit
+---
+# TokenRun
+
+在自己的电脑上运行大模型：中文网页、模型管理、Strata 和 llama.cpp 两种引擎。基于
+[Niko1221/Strata](https://github.com/Niko1221/Strata)（MIT）。源码：https://github.com/star1872/Strata （分支 oldhw）。
+
+## Windows
+
+下载 [TokenRun-windows-x64.zip](https://www.modelscope.cn/models/{repo}/resolve/master/TokenRun-windows-x64.zip)，
+整个解压，双击 `TokenRun.exe`。浏览器会打开模型管理页：选模型、下载、启动，然后对话。
+电脑上不需要装 Python 或 git。
+
+## Linux（x86_64）
+
+```bash
+curl -fsSL https://www.modelscope.cn/models/{repo}/resolve/master/install.sh | sh
+tokenrun
+```
+
+不用 sudo，装在 `~/.local/share/tokenrun`。没有屏幕的服务器：`tokenrun --host 0.0.0.0`，再从另一台电脑打开
+`http://<服务器地址>:8090/`。再运行一次安装命令就是更新，已下载的模型和引擎会保留。
+
+引擎和模型由页面从魔搭下载。本仓库的文件由 GitHub Actions 打包上传（{sha}）。
+
+## 作者与联系方式
+
+TokenRun 由 **星辰**（GitHub [star1872](https://github.com/star1872)）开发并开源，引擎和原始代码来自 [Niko1221/Strata](https://github.com/Niko1221/Strata)。
+
+- 使用问题：请在 GitHub 提 [Issue](https://github.com/star1872/Strata/issues)。个人精力有限，不提供一对一的免费技术支持。
+- 商务合作、定制开发：邮箱 cloud17778@outlook.com，或加微信（请注明来意）：
+
+<img src="https://www.modelscope.cn/models/{repo}/resolve/master/wechat-qr.png" width="273" alt="星辰的微信二维码">
+"""
+
+
+def tokenrun(files: list[Path]) -> None:
+    """The ready-to-run packages (tools/package_portable.py) and install.sh at the top of the TokenRun repository on
+    ModelScope (TOKENRUN_MS_REPO), the links its README and install.sh give."""
+    token = os.environ.get("MODELSCOPE_TOKEN", "").strip()
+    repo = os.environ.get("TOKENRUN_MS_REPO", "").strip() or "mymodel3861/TokenRun"
+    if not token:
+        print("MODELSCOPE_TOKEN is not set: no copy on ModelScope")
+        return
+    from modelscope_hub.api import HubApi
+    api = HubApi(token=token)
+    api.login(token)
+    if not api.repo_exists(repo, "model"):
+        api.create_repo(repo, "model", visibility="public", license="mit",
+                        description="TokenRun: run LLMs on your own PC (Windows exe, Linux one command)")
+        print(f"created {repo}")
+    sha = os.environ.get("GITHUB_SHA", "")[:7]
+    readme = TOKENRUN_MS_README.replace("{repo}", repo).replace("{sha}", sha or "local")
+    api.upload_file(repo, "model", readme.encode(), "README.md", commit_message="README", disable_tqdm=True)
+    qr = ROOT / "docs" / "media" / "wechat-qr.png"                # the README's contact picture
+    if qr.exists():
+        api.upload_file(repo, "model", str(qr), qr.name, commit_message="contact picture", disable_tqdm=True)
+    for f in files:
+        api.upload_file(repo, "model", str(f), f.name, commit_message=f"{f.name} ({sha})", disable_tqdm=True)
+        print(f"-> {repo}/{f.name} ({f.stat().st_size / 1e6:.1f} MB)", flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("step", choices=["llama", "zip", "modelscope"])
+    ap.add_argument("step", choices=["llama", "zip", "modelscope", "llama-mirror", "tokenrun"])
     ap.add_argument("files", nargs="*", type=Path)
     ap.add_argument("--exe", type=Path)
     ap.add_argument("--vision", type=Path)
@@ -127,8 +247,12 @@ def main() -> None:
     a = ap.parse_args()
     if a.step == "llama":
         llama()
+    elif a.step == "llama-mirror":
+        llama_mirror()
     elif a.step == "modelscope":
         modelscope(a.files)
+    elif a.step == "tokenrun":
+        tokenrun(a.files)
     else:
         if not (a.exe and a.out):
             ap.error("zip needs --exe and --out")

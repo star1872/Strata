@@ -52,6 +52,8 @@ async function loadHardware(refresh = false) {
     [t("CPU"), `${hw.cpu}${hw.avx512 ? " (AVX-512)" : hw.avx2 ? " (AVX2)" : ""}`],
     [t("Model folder"), `${hw.models_dir} · ${t("{n} GB free", {n: fmt(hw.free_gb, 0)})}`], [t("System"), hw.os]]
     .map(([k, v]) => `<dt>${esc(k)}</dt><dd class="pre">${esc(v)}</dd>`).join("");
+  $("dl-dir").placeholder = hw.data_dir;
+  if (!$("dl-dir").dataset.loaded) { $("dl-dir").dataset.loaded = "1"; $("dl-dir").value = store.get("dataDir", ""); checkFolder(false); }
   $("wi-ram").placeholder = fmt(hw.ram_gb, 0);
   const usable = hw.gpus.filter((g) => !g.problem);
   $("wi-vram").placeholder = usable.length ? fmt(Math.max(...usable.map((g) => g.vram_gb)), 0) : "0";
@@ -67,6 +69,26 @@ $("wi-reset").onclick = () => { whatIf = null; $("wi-ram").value = ""; $("wi-vra
 
 // ------------------------------------------------------------------ download source
 const pickSource = () => (document.querySelector("input[name=src]:checked") || {}).value || "auto";
+// the download folder: empty = the default (setup's data folder); kept in this browser
+const dataDir = () => $("dl-dir").value.trim();
+const dirQuery = () => (dataDir() ? `dir=${encodeURIComponent(dataDir())}` : "");
+async function checkFolder(reload) {
+  const info = $("dl-info");
+  try {
+    const r = await api(`api/folder${dataDir() ? "?path=" + encodeURIComponent(dataDir()) : ""}`);
+    info.dataset.state = r.writable ? "ok" : "err";
+    info.textContent = r.writable
+      ? t("{path}: {n} GB free", {path: r.path, n: fmt(r.free_gb, 0)}) + (r.exists ? "" : " · " + t("it will be created"))
+      : t("{path}: no permission to write there", {path: r.path});
+    store.set("dataDir", dataDir());
+  } catch (e) {
+    info.dataset.state = "err";
+    info.textContent = e.message;
+  }
+  if (reload) { loadModels(); if (llRepo) listVariants(llRepo); }
+}
+$("dl-check").onclick = () => checkFolder(true);
+$("dl-dir").addEventListener("change", () => checkFolder(true));
 for (const r of document.querySelectorAll("input[name=src]")) {
   r.checked = r.value === store.get("source", "auto");
   r.onchange = () => store.set("source", pickSource());
@@ -121,7 +143,7 @@ function reasonText(r) {
     case "low_ram": return t("{ram} GB of RAM is less than its {experts} GB of experts + 10 GB: the low-RAM mode reads experts from the SSD, much slower (about {need} GB of RAM runs it normally).", {ram: n(r.ram), experts: n(r.experts), need: r.need});
     case "low_ram_resident": return t("{ram} GB of RAM holds its {experts} GB of experts only together with the graphics card: setup uses the low-RAM mode and copies the experts the card does not hold into RAM once.", {ram: n(r.ram), experts: n(r.experts)});
     case "ram_short": return t("{ram} GB of RAM: it needs about {need} GB. The model will not start.", {ram: n(r.ram), need: r.need});
-    case "disk": return t("Only {free} GB free in the model folder; the download needs about {need} GB (choose another folder with --data-dir).", {free: n(r.free), need: r.need});
+    case "disk": return t("Only {free} GB free in the model folder; the download needs about {need} GB (choose a bigger folder under Download folder above).", {free: n(r.free), need: r.need});
     case "experimental": return t("Experimental.");
     default: return r.code;
   }
@@ -129,7 +151,7 @@ function reasonText(r) {
 const klass = (c) => (c ? t(c) : "");
 let models = [], installedMap = {};
 async function loadModels() {
-  const q = whatIf ? `?ram=${whatIf.ram}&vram=${whatIf.vram}` : "";
+  const q = whatIf ? `?ram=${whatIf.ram}&vram=${whatIf.vram}` : dataDir() ? "?" + dirQuery() : "";
   const r = await api("api/models" + q);
   models = r.models; installedMap = r.installed;
   $("models-note").textContent = whatIf ? t("For a PC with {ram} GB of RAM and {vram} GB of VRAM", {ram: whatIf.ram, vram: whatIf.vram}) : t("For this PC");
@@ -165,20 +187,66 @@ $("models").addEventListener("click", async (e) => {
     const disk = m.fit.reasons.find((r) => r.code === "disk");
     if (disk && !confirm(t("Not enough free disk space for {model}: about {need} GB is needed, the model folder has {free} GB. The install will most likely stop at its disk check.\n\nTry anyway?", {model: m.model, need: disk.need, free: fmt(disk.free, 0)}))) return;
     try {
-      await api("api/install", {family: m.family, model: m.model, source: pickSource()});
+      await api("api/install", {family: m.family, model: m.model, source: pickSource(), data_dir: dataDir() || null});
       pollJobs();
     } catch (err) {
       toast("error", t(err.status === 409 ? "Something is already running" : "Could not start the install"), err.status === 409 ? t("Wait for it to finish, or stop it.") : err.message);
     }
   }
   if (st) {
-    try { await api("api/start", {key: st.dataset.start}); pollJobs(); }
-    catch (err) {
-      if (err.status === 409 && err.body.error === "running") toast("warn", t("A model is already running"), t("Close its window (or press Ctrl+C in it) first: the graphics card holds one model."), 7000);
-      else toast("error", t(err.status === 409 ? "Something is already running" : "Could not start the model"), err.status === 409 ? t("Wait for it to finish, or stop it.") : err.message);
-    }
+    startModel(st.dataset.start);
   }
 });
+
+// ------------------------------------------------------------------ start a model, then its chat
+// The chat is the model's own page on its own port.  A tab opened by the Start click itself (a later window.open is
+// stopped by popup blockers) waits for the model and then turns into the chat; the progress card's button is there
+// as well, in case the browser blocked the tab or it was closed.
+let chatTab = null, chatArmed = false;          // armed: the server took this Start (an older job is not it)
+const chatUrl = (port) => `${location.protocol}//${location.hostname}:${port}/`;
+function waitingTab() {
+  let w = null;
+  try { w = window.open("", "_blank"); } catch (e) { /* blocked */ }
+  if (!w) return null;
+  try {
+    w.document.title = t("Loading the model…");
+    w.document.body.innerHTML = `<p style="font:16px/1.6 system-ui,sans-serif;max-width:560px;margin:80px auto;padding:0 16px;color:#555">` +
+      `${esc(t("Loading the model (1-3 minutes)…"))}<br>${esc(t("The chat opens in this tab by itself when the model is ready."))}</p>`;
+  } catch (e) { /* the tab works without the note */ }
+  return w;
+}
+async function startModel(key) {
+  if (chatTab && !chatTab.closed) chatTab.close();
+  chatArmed = false;
+  chatTab = waitingTab();
+  try {
+    await api("api/start", {key});
+    chatArmed = true;
+    pollJobs();
+    $("job-card").scrollIntoView({behavior: "smooth", block: "start"});
+  } catch (err) {
+    if (chatTab) { chatTab.close(); chatTab = null; }
+    if (err.status === 409 && err.body.error === "running") toast("warn", t("A model is already running"), t("Close its window (or press Ctrl+C in it) first: the graphics card holds one model."), 7000);
+    else toast("error", t(err.status === 409 ? "Something is already running" : "Could not start the model"), err.status === 409 ? t("Wait for it to finish, or stop it.") : err.message);
+  }
+}
+function chatReady(port) {
+  showChat(port);
+  $("job-chat").href = chatUrl(port);
+  $("job-chat").hidden = false;
+  if (chatTab && chatArmed) {
+    try { if (!chatTab.closed) chatTab.location.href = chatUrl(port); } catch (e) { /* closed meanwhile */ }
+    chatTab = null;
+  }
+}
+function chatFailed() {
+  if (!chatTab || !chatArmed) return;
+  try {
+    if (!chatTab.closed) chatTab.document.body.innerHTML = `<p style="font:16px/1.6 system-ui,sans-serif;max-width:560px;margin:80px auto;padding:0 16px;color:#b42318">` +
+      `${esc(t("The model did not start: see the log in the model manager."))}</p>`;
+  } catch (e) { /* closed */ }
+  chatTab = null;
+}
 
 // ------------------------------------------------------------------ install / start progress
 let current = null, pollTimer = null, lastDone = null;
@@ -192,7 +260,8 @@ async function pollJobs() {
   if (!j) return;
   current = name;
   const what = j.kind === "install" ? `${(models.find((m) => m.family === j.what.family) || {}).family_title || j.what.family} ${j.what.model}` : j.what.model_name;
-  $("job-title").textContent = j.running ? t(j.kind === "install" ? "Installing {what}" : "Starting {what}", {what})
+  $("job-title").textContent = j.kind === "start" && j.running && j.ready ? t("{what} is running", {what})
+                            : j.running ? t(j.kind === "install" ? "Installing {what}" : "Starting {what}", {what})
                                          : t(j.kind === "install" ? "Install: {what}" : "Start: {what}", {what});
   const mins = Math.floor(j.seconds / 60), secs = j.seconds % 60;
   let status;
@@ -205,8 +274,11 @@ async function pollJobs() {
   $("job-log").textContent = j.lines.join("\n");
   $("job-log").scrollTop = $("job-log").scrollHeight;
   $("job-stop").hidden = !j.running;
-  if (j.kind === "start" && j.running && j.ready) showChat(j.what.port);
-  if (!j.running && lastDone !== name + j.code) { lastDone = name + j.code; loadModels(); }
+  const ready = j.kind === "start" && j.running && j.ready;
+  if (ready) chatReady(j.what.port);
+  else $("job-chat").hidden = true;
+  if (j.kind === "start" && !j.running) chatFailed();
+  if (!j.running && lastDone !== name + j.code) { lastDone = name + j.code; loadModels(); loadLlama(); }
   if (j.running) { lastDone = null; pollTimer = setTimeout(pollJobs, 1500); }
 }
 $("job-stop").onclick = async () => {
@@ -276,12 +348,80 @@ for (const b of document.querySelectorAll("[data-ex]")) b.onclick = () => {
 function showChat(port) {
   const chat = $("open-chat");
   chat.hidden = !port;
-  if (port) chat.href = `http://127.0.0.1:${port}/`;
+  if (port) chat.href = `${location.protocol}//${location.hostname}:${port}/`;   // this page's host: also from another PC
 }
 async function checkRunning() {
   try { const r = await api("api/running"); showChat(r.ports[0]); } catch (e) { /* the manager stopped */ }
   setTimeout(checkRunning, 5000);
 }
+
+// ------------------------------------------------------------------ other models: llama.cpp
+const WHERE = {gpu: "Fits in VRAM: fast.", "gpu+ram": "Split between VRAM and RAM.", cpu: "No GPU: the CPU runs it from RAM.",
+               ssd: "Does not fit in VRAM and RAM: it would be read from the disk, very slowly."};
+let llRepo = "", llVariants = [];
+// the Models card's two engines: Strata's own model (the default) and any GGUF model through llama.cpp
+function showPane(name, save) {
+  for (const b of document.querySelectorAll(".model-tabs .st-tab")) b.setAttribute("aria-selected", String(b.dataset.pane === name));
+  $("pane-strata").hidden = name !== "strata";
+  $("pane-llama").hidden = name !== "llama";
+  if (save) store.set("modelTab", name);
+}
+for (const b of document.querySelectorAll(".model-tabs .st-tab")) b.onclick = () => showPane(b.dataset.pane, true);
+showPane(store.get("modelTab", "strata") === "llama" ? "llama" : "strata");
+async function loadLlama() {
+  let r;
+  try { r = await api("api/llama/models"); } catch (e) { $("mt-llama").hidden = true; showPane("strata"); return; }
+  $("ll-build").textContent = t("llama.cpp {b}", {b: r.build});
+  $("ll-suggest").innerHTML = r.suggested.map((x) => `<button type="button" class="link" data-repo="${esc(x.repo)}" title="${esc(x.about)}">${esc(x.title)}</button>`).join(" · ");
+  const inst = Object.entries(r.installed);
+  $("ll-installed").innerHTML = inst.length ? `<div class="fam"><div class="fam__head"><b>${esc(t("Installed"))}</b></div>` + inst.map(([k, c]) =>
+    `<div class="size"><div class="size__main"><div class="size__name"><b>${esc(c.variant ? c.variant.split("/").pop() : k)}</b></div>` +
+    `<div class="muted small">${esc(c.repo || "")} · ${esc(fmt(c.gb, 1))} GB</div></div>` +
+    `<div class="size__side"><span class="st-badge st-badge--reading">${esc(t("Installed"))}</span><button class="st-btn st-btn--primary" data-start="llama/${esc(k)}">${esc(t("Start"))}</button></div></div>`).join("") + `</div>` : "";
+}
+async function listVariants(repo) {
+  llRepo = repo.trim();
+  if (!llRepo) return;
+  $("ll-repo").value = llRepo;
+  const box = $("ll-variants");
+  box.innerHTML = `<p class="muted">${esc(t("Reading the repository…"))}</p>`;
+  $("ll-go").disabled = true;
+  try {
+    const r = await api(`api/llama/variants?repo=${encodeURIComponent(llRepo)}&source=${encodeURIComponent(pickSource())}${dataDir() ? "&" + dirQuery() : ""}`);
+    llVariants = r.variants;
+    if (!llVariants.length) { box.innerHTML = `<p class="msg-error">${esc(t("No model .gguf files there."))}</p>`; return; }
+    box.innerHTML = `<div class="fam"><div class="fam__head"><b>${esc(llRepo)}</b><span class="muted small">${esc(t(r.source === "modelscope" ? "from ModelScope" : "from Hugging Face"))}</span></div>` +
+      llVariants.map((v, i) => {
+        const [cls, label] = LEVEL[v.fit.level];
+        const notes = [t(WHERE[v.fit.where])];
+        if (v.fit.need_ram) notes.push(t("It needs about {n} GB of RAM.", {n: v.fit.need_ram}));
+        if (v.disk) notes.push(t("Only {free} GB free in the model folder; the download needs about {need} GB (choose a bigger folder under Download folder above).", {free: fmt(r.free_gb, 0), need: fmt((v.left_gb ?? v.gb) + 2, 0)}));
+        return `<div class="size"><div class="size__main"><div class="size__name"><b>${esc(v.label)}</b></div>` +
+          `<div class="size__nums small">${esc(t("Download {d} GB", {d: fmt(v.gb, 1)}))}${v.files > 1 ? " · " + esc(t("{n} files", {n: v.files})) : ""}</div>` +
+          `<ul class="reasons small">${notes.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>` +
+          `<div class="size__side"><span class="st-badge ${cls}">${esc(t(label))}</span><button class="st-btn st-btn--secondary" data-ll-install="${i}">${esc(t("Download and install"))}</button></div></div>`;
+      }).join("") + `</div>`;
+  } catch (err) {
+    box.innerHTML = `<p class="msg-error">${esc(t("Could not read the repository: {e}", {e: err.message}))}</p>`;
+  } finally { $("ll-go").disabled = false; }
+}
+$("ll-go").onclick = () => listVariants($("ll-repo").value);
+$("ll-repo").addEventListener("keydown", (e) => { if (e.key === "Enter") listVariants($("ll-repo").value); });
+$("ll-suggest").addEventListener("click", (e) => { const b = e.target.closest("[data-repo]"); if (b) listVariants(b.dataset.repo); });
+$("ll-variants").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-ll-install]");
+  if (!b) return;
+  const v = llVariants[+b.dataset.llInstall];
+  if (v.fit.level === "no" && !confirm(t("{model} does not fit in this PC's VRAM and RAM: it would run from the disk, very slowly.\n\nDownload anyway?", {model: v.label}))) return;
+  if (v.disk && !confirm(t("Not enough free disk space for {model}: about {need} GB is needed, the model folder has {free} GB. The install will most likely stop at its disk check.\n\nTry anyway?", {model: v.label, need: fmt((v.left_gb ?? v.gb) + 2, 0), free: "?"}))) return;
+  try { await api("api/llama/install", {repo: llRepo, variant: v.name, source: pickSource(), data_dir: dataDir() || null}); pollJobs(); }
+  catch (err) { toast("error", t(err.status === 409 ? "Something is already running" : "Could not start the install"), err.status === 409 ? t("Wait for it to finish, or stop it.") : err.message); }
+});
+$("ll-installed").addEventListener("click", async (e) => {
+  const st = e.target.closest("[data-start]");
+  if (!st) return;
+  startModel(st.dataset.start);
+});
 
 // ------------------------------------------------------------------ start
 let embedded = false;
@@ -292,6 +432,7 @@ let embedded = false;
   $("note-standalone").hidden = embedded;
   $("note-embedded").hidden = !embedded;
   if (!embedded) checkRunning();
+  loadLlama();
   try { await loadHardware(); await loadModels(); } catch (e) { toast("error", t("The model manager is not reachable"), e.message, 8000); }
   pollJobs();
 })();

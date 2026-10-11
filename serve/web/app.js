@@ -1,4 +1,4 @@
-// serve/web/app.js - the Strata web app: Chat, Monitor, About. No framework, no network beyond this server.
+// serve/web/app.js - the TokenRun web app (built on Strata): Chat, Monitor, About. No framework, no network beyond this server.
 // The Monitor tab rebuilds PR #22's dashboard idea (code-martin) on the server's own /metrics.
 // Every text a person reads goes through t() (i18n.js, loaded first): English is the key, zh-CN its translation.
 "use strict";
@@ -173,7 +173,7 @@ async function poll() {
     const r = await fetch(reqShowAll ? "metrics?requests=all" : "metrics", {headers: headers()});
     if (r.status === 401) {
       setPill("error", t("API key needed"));
-      if (!keyWarned) { keyWarned = true; toast("warn", t("API key needed"), t("This server needs a key: add it under About > Settings."), 6000); }
+      if (!keyWarned) { keyWarned = true; toast("warn", t("API key needed"), t("This server needs a key: add it under Settings > General."), 6000); }
     } else if (r.ok) {
       lastMetrics = await r.json();
       metricsFailures = 0;
@@ -394,7 +394,7 @@ function renderAbout(eng, hw, st) {
   const kv = {int8: "8-bit", q4_0: "4-bit (Hadamard-rotated)", fp16: "16-bit"}[eng.kv];
   facts($("facts-engine"), [
     [t("Model"), eng.model],
-    [t("Engine"), eng.version ? `v${eng.version}` : t("built from source")],
+    [t("Engine"), eng.version ? (/^\d/.test(eng.version) ? `v${eng.version}` : eng.version) : t("built from source")],   // "llama.cpp b…" as it is
     [t("Context"), eng.max_context ? t("{n} tokens", {n: fmt(eng.max_context)}) : null],
     [t("KV cache"), eng.kv ? `${kv ? t(kv) : eng.kv}${eng.kv_resident ? t(", streamed: {n} positions per layer in VRAM, the rest in RAM", {n: fmt(eng.kv_resident)}) : t(", all in VRAM")}` : null],
     [t("Experts in VRAM"), eng.expert_slots ? `${fmt(eng.expert_slots)} (${gb((eng.expert_cache_mib || 0) * 1048576)} GB)` : null],
@@ -1256,7 +1256,7 @@ async function answer() {
     if (!r.ok) {
       let msg = `HTTP ${r.status}`;
       try { msg = (await r.json()).error.message || msg; } catch (e) { /* not json */ }
-      if (r.status === 401) msg = t("This server needs an API key: add it under About > Settings.");
+      if (r.status === 401) msg = t("This server needs an API key: add it under Settings > General.");
       throw new Error(msg);
     }
     const reader = r.body.getReader(), dec = new TextDecoder();

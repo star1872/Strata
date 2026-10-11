@@ -1,0 +1,57 @@
+# TokenRun's ready-to-run packages (tools/package_portable.py): Windows (TokenRun-windows-x64.zip, TokenRun.exe) and
+# Linux (TokenRun-linux-x64.tar.gz, `tokenrun`; tools/portable/install.sh installs it), each built on its own system.
+# They go to the GitHub release tokenrun-latest and to ModelScope (TOKENRUN_MS_REPO, default mymodel3861/TokenRun),
+# which mainland China reaches when GitHub does not; without MODELSCOPE_TOKEN that copy is skipped.
+name: TokenRun packages (oldhw)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [oldhw]
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python tools/package_portable.py --out dist
+      - uses: actions/upload-artifact@v4
+        with: {name: tokenrun-windows, path: dist/TokenRun-windows-x64.zip, retention-days: 30}
+
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python tools/package_portable.py --out dist
+      - uses: actions/upload-artifact@v4
+        with: {name: tokenrun-linux, path: dist/TokenRun-linux-x64.tar.gz, retention-days: 30}
+
+  publish:
+    needs: [windows, linux]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: {path: dist, merge-multiple: true}
+      - name: release tokenrun-latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp tools/portable/install.sh dist/install.sh
+          NOTES="TokenRun ready-to-run packages (branch oldhw, ${GITHUB_SHA::7}). Windows: unzip, double-click TokenRun.exe. Linux: curl -fsSL https://www.modelscope.cn/models/mymodel3861/TokenRun/resolve/master/install.sh | sh"
+          gh release view tokenrun-latest >/dev/null 2>&1 || gh release create tokenrun-latest --target "$GITHUB_SHA" --title "TokenRun (latest)" --notes "$NOTES" --prerelease
+          gh release edit tokenrun-latest --notes "$NOTES"
+          gh release upload tokenrun-latest dist/TokenRun-windows-x64.zip dist/TokenRun-linux-x64.tar.gz dist/install.sh --clobber
+      - name: copy on ModelScope
+        env:
+          MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_TOKEN }}
+          TOKENRUN_MS_REPO: ${{ vars.TOKENRUN_MS_REPO }}
+        run: |
+          python3 -m pip install "modelscope-hub==0.4.5"
+          python3 tools/ci_package.py tokenrun dist/TokenRun-windows-x64.zip dist/TokenRun-linux-x64.tar.gz dist/install.sh

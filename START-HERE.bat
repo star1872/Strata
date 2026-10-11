@@ -1,8 +1,8 @@
 @echo off
-rem Strata for Windows: the first run installs everything and starts the model; later runs just start it.
+rem TokenRun (built on Strata) for Windows: the first run installs everything and starts the model; later runs just start it.
 rem Needs only an NVIDIA or AMD graphics driver. Python is installed for your user account if it is missing (no admin needed).
 setlocal
-title Strata
+title TokenRun
 cd /d "%~dp0"
 if exist ".venv\Scripts\python.exe" goto run
 
@@ -10,17 +10,17 @@ call :findpy
 if defined PY goto venv
 echo.
 echo  Python 3.10 or newer is not installed. Installing Python 3.12 for your user account ...
-where winget >nul 2>nul
-if errorlevel 1 goto pyorg
-winget install -e --id Python.Python.3.12 --scope user --silent --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity
-call :findpy
-if defined PY goto venv
-:pyorg
-echo  Downloading the Python installer from python.org ...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest -UseBasicParsing https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe -OutFile \"$env:TEMP\strata-python-setup.exe\""
+rem the official installer, from a mirror in China first (python.org and winget's copy of it stall there), signature checked
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\get_python.ps1" "%TEMP%\strata-python-setup.exe"
 if exist "%TEMP%\strata-python-setup.exe" "%TEMP%\strata-python-setup.exe" /quiet InstallAllUsers=0 PrependPath=1 Include_launcher=1 Include_test=0
 call :findpy
 if defined PY goto venv
+where winget >nul 2>nul
+if errorlevel 1 goto nopy
+winget install -e --id Python.Python.3.12 --scope user --silent --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity
+call :findpy
+if defined PY goto venv
+:nopy
 echo.
 echo  Python could not be installed automatically.
 echo  Install 64-bit Python 3.12 from https://www.python.org/downloads/ ("Add python.exe to PATH"),

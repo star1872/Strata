@@ -70,6 +70,24 @@ HF_REVISIONS = {
 }
 
 
+def _trust_certifi() -> None:
+    """Windows: HTTPS checks trust certifi's (Mozilla's) root certificates as well as the system's.  A Windows PC
+    whose root certificates were never updated (a fresh cloud image, 2026-10-11 on an RTX 4090 box) fails github.com
+    with CERTIFICATE_VERIFY_FAILED; the TokenRun package's Python ships certifi.  On Windows Python adds the
+    SSL_CERT_FILE file to the system store (ssl load_default_certs), and the processes started from here (pip, the
+    servers, tools) inherit it.  Not on Linux/macOS, where it would replace the system's certificates."""
+    if os.name != "nt" or os.environ.get("SSL_CERT_FILE"):
+        return
+    try:
+        import certifi
+        os.environ["SSL_CERT_FILE"] = certifi.where()
+    except Exception:                                  # no certifi: the system's certificates only, as before
+        pass
+
+
+_trust_certifi()
+
+
 HF_DEFAULT = "https://huggingface.co"
 
 
@@ -178,8 +196,8 @@ LLAMA_CPP_ZIP = f"https://github.com/ggml-org/llama.cpp/archive/{LLAMA_CPP_COMMI
 # This fork (branch oldhw): its own engine first - the release oldhw-v<version>, built by GitHub Actions from the
 # fork's sources (.github/workflows/oldhw-engine.yml) - then the official release of the same version and the latest
 # (UPSTREAM_*), for an engine the fork does not build (CUDA 12, AMD) or a version not built yet.
-PREBUILT_URL = "https://github.com/1872183316/Strata/releases/latest/download/"
-PREBUILT_TAG_URL = "https://github.com/1872183316/Strata/releases/download/oldhw-v{version}/"
+PREBUILT_URL = "https://github.com/star1872/Strata/releases/latest/download/"
+PREBUILT_TAG_URL = "https://github.com/star1872/Strata/releases/download/oldhw-v{version}/"
 UPSTREAM_PREBUILT_URL = "https://github.com/Niko1221/Strata/releases/latest/download/"
 UPSTREAM_PREBUILT_TAG_URL = "https://github.com/Niko1221/Strata/releases/download/v{version}/"
 # A copy of the fork's release on ModelScope (tools/ci_package.py modelscope), for PCs that reach ModelScope but not
@@ -203,6 +221,7 @@ CUDA12_MIN_DRIVER = 528 if WIN else 525
 ENGINE12_DIR = "engine-cuda12"
 MIN_ENGINE = (0, 1, 39)                # v0.1.39: the #577 file-tier regression fixed, the OpenAI Responses API (#451, Codex), a reply stuck on one token ended (#606), the head before the arena (#620), effort_position (#458), --vram-reserve hot resize opt-in (#533), PR batch; v0.1.38: prompts faster (one gather per expert group #372, the first chunk's PLE rows beside layer 0 #374, DeltaNet three heads per thread #413), --kv q4_0 prompts on tensor cores (#452), Q5_0 experts on the GPU (#473), IQ4_XS on AVX-2 (#415), unbuffered expert loading on Windows (#357 #362), --peer-device (#531), a 6 GB card starts (#496), PR batch; v0.1.37: a silent engine is restarted (#481), Windows AMD counts the desktop's VRAM (#380 #377 #497), a steadier PCIe probe (#485), fixes #496 #495 #498 #505 #493; v0.1.36: a cancelled prompt logged as read so far (#471), the draft-head hint (#474), UPDATE.bat (#475), --expert-profile-save (#477); v0.1.35: Windows AMD uses its bundled HIP runtime (#468 #461), the low-RAM resident mode on Windows 32 GB (#467), fixes #460 #459 #446 #447 #457 #448 #444; v0.1.34: AMD on Windows (a ready-made HIP engine), an MCP server for AI assistants (tools/strata_mcp.py), a shorter README; v0.1.33: a portable image encoder again (#411 #412), setup recommends instead of forcing (#406 #403 #364 #384), fixes #352 #365 #369 #371 #375 #393 #408 #414; v0.1.32: split prompts faster (#340), AMD router +12%, Unsloth Q4 in setup, faster Q4 prompts, #326/#327/#342/#344 fixes, PR batch; v0.1.31: Unsloth UD-Q4_K_XL (experimental), GGUF-in-place low-RAM mode, Windows GGUF load 2x, server race + tokenizer fixes, AMD intrinsics; v0.1.30: short prompts faster (streaming from 1024 tokens), resident low-RAM variant, multi-GPU session carve, RDNA4; v0.1.29: sampled answers faster (split top-k), #154 correctness fixes; v0.1.28: the expert cache reserves the draft head, a cancelled request no longer fails the next; v0.1.27: RTX 20 (sm_75) in the ready-made engine, the HIP build without CUDA headers; v0.1.26: the draft layer's prompt pass in batches; v0.1.25: faster prompts (grouping off the copy engine, fused hyper-connection kernels), AMD HIP backend, --kv k8v4; v0.1.24: long prompts faster (QSA select on tensor cores); v0.1.23: image requests honor sampling, 8 GB cards start, batched verify window; v0.1.22: faster prompts (tensor-core attention), multi-GPU across images/steering/KV streaming; v0.1.21: multi-GPU layer split (--gpus); v0.1.20: system-prompt checkpoint, PCIe probe, hit rate; v0.1.19: penalties
 PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "cmake", "ninja", "pillow", "psutil"]
+PIP_MIRRORS = ["https://pypi.tuna.tsinghua.edu.cn/simple/", "https://mirrors.cloud.tencent.com/pypi/simple/"]
 REQUIREMENTS = ROOT / "requirements.txt"   # the same packages and their dependencies, pinned (#214)
 
 MODELS = {
@@ -1453,6 +1472,20 @@ def requirement_lines(path: Path | None = None) -> list[str]:
     return lines
 
 
+BUILD_TOOLS = ("cmake", "ninja")        # only for building the engine from source: installed by cmake_build when needed
+
+
+def runtime_requirements() -> list[str]:
+    """requirements.txt without the build tools (cmake's wheel alone is ~100 MB installed)."""
+    lines = requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES
+    return [p for p in lines if req_name(p) not in BUILD_TOOLS]
+
+
+def build_requirements() -> list[str]:
+    lines = requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES
+    return [p for p in lines if req_name(p) in BUILD_TOOLS]
+
+
 def _installed(name: str) -> bool:
     try:
         import importlib.metadata as md
@@ -1475,7 +1508,19 @@ def pip_install(packages, what):
         ok(f"{what} already installed")
         return
     say(f"  Installing {what} ...")
-    run([sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", *need])
+    pip = [sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--timeout", "20"]
+    if os.environ.get("PIP_INDEX_URL"):                # an index the user chose: only that one
+        run(pip + need)
+    else:
+        # from mainland China pypi.org often breaks off mid-file: on 2026-10-07 (a cloud PC there) one cmake wheel took
+        # 580 s and failed with SSLError, the same file from Tsinghua's or Tencent's mirror took 4 s (Aliyun's 116 s).
+        # The same pinned packages; mirrors first where ModelScope is the model source, else last
+        indexes = [None] + PIP_MIRRORS if model_source() != "modelscope" else PIP_MIRRORS + [None]
+        for i, index in enumerate(indexes):
+            r = run(pip + (["--index-url", index] if index else []) + need, check=i == len(indexes) - 1)
+            if r.returncode == 0:
+                break
+            warn(f"pip could not install from {index or 'pypi.org'}; trying {indexes[i + 1] or 'pypi.org'}")
     stamp.write_text(json.dumps(sorted(set(have) | set(need)), indent=0))
     ok(f"{what} installed")
 
@@ -2390,6 +2435,9 @@ def install_build_tools(gpu, yes):
 def cmake_build(src, bdir, target, defs, vcvars, bat_name):
     cmake, ninja = find_tool("cmake"), find_tool("ninja")
     if cmake is None or ninja is None:
+        pip_install(build_requirements(), "cmake, ninja (the build tools)")
+        cmake, ninja = find_tool("cmake"), find_tool("ninja")
+    if cmake is None or ninja is None:
         fail("cmake / ninja not found after installing them", "run: .venv python -m pip install cmake ninja")
     conf = [cmake, "-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={ninja}", "-S", str(src), "-B", str(bdir),
             "-DCMAKE_BUILD_TYPE=Release", *defs]
@@ -3202,8 +3250,7 @@ def update_install(have: list, a) -> int:
         say("  No model is installed in this Strata folder yet: run START-HERE.bat (Linux: ./setup.sh) to set it up -")
         say("  it finds an earlier install's model files next to it and reuses them.")
         return 0
-    pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
-                "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
+    pip_install(runtime_requirements(), "numpy, jinja2, regex, pyyaml, tqdm, requests, pillow, psutil")
     if not a.build:
         update_installed_engine(a.prebuilt)
     for cfg_path in have:
@@ -3638,7 +3685,7 @@ def write_run_script(model, cfg_path, port, open_browser=True):
              "--port", str(port)] + (["--open"] if open_browser else [])
     if WIN:
         script = ROOT / f"run-{model.lower()}.bat"
-        script.write_text("@echo off\r\ntitle Strata " + model + "\r\ncd /d \"" + str(ROOT) + "\"\r\n" +
+        script.write_text("@echo off\r\ntitle TokenRun " + model + "\r\ncd /d \"" + str(ROOT) + "\"\r\n" +
                           " ".join(f'"{x}"' for x in serve) + "\r\nif errorlevel 1 pause\r\n", encoding="utf-8")
     else:
         script = ROOT / f"run-{model.lower()}.sh"
@@ -4296,8 +4343,7 @@ def main() -> int:
 
     # ---- 3. python packages
     step(3, "Python packages")
-    pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
-                "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
+    pip_install(runtime_requirements(), "numpy, jinja2, regex, pyyaml, tqdm, requests, pillow, psutil")
 
     # ---- 4. the engine
     step(4, "the Strata engine")

@@ -21,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -271,10 +272,36 @@ class Job:
 
 
 JOBS: dict[str, Job] = {}
+LISTEN_HOST = "127.0.0.1"    # main --host: a model started from the page listens there too (its chat page opens)
 LOCK = threading.Lock()
 
 
-def install(family: str, model: str, source: str, context: int | None) -> Job:
+def data_dir_arg(path) -> str | None:
+    """A data folder the page names (where the model files go): an absolute path, made if missing.  None: the
+    default (setup's remembered data folder, else Strata-data beside this folder).  ValueError for anything else."""
+    if path is None or not str(path).strip():
+        return None
+    p = str(path).strip()
+    if any(c in p for c in "\r\n\0") or p.startswith("-") or not os.path.isabs(os.path.expanduser(p)):
+        raise ValueError("the folder must be a full path, e.g. /data/models or D:\\Models")
+    return str(Path(p).expanduser().resolve())
+
+
+def folder_info(path) -> dict:
+    """GET folder?path=: whether the models can go there and how much space it has."""
+    p = data_dir_arg(path) or hardware()["data_dir"]
+    probe = Path(p)
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        free = round(shutil.disk_usage(probe).free / 1e9, 1)
+    except OSError:
+        free = None
+    writable = os.access(probe, os.W_OK)
+    return {"path": p, "exists": Path(p).is_dir(), "writable": writable, "free_gb": free}
+
+
+def install(family: str, model: str, source: str, context: int | None, data_dir: str | None = None) -> Job:
     """setup.py --setup --no-start --yes with this family, size and download source: the same install the terminal
     makes with these answers (an explicit --model is the consent to a risk setup would otherwise stop at)."""
     if family not in S.FAMILIES or model not in S.MODELS or family not in S.MODELS[model].get("families", ("qwen", "swift")):
@@ -287,16 +314,76 @@ def install(family: str, model: str, source: str, context: int | None) -> Job:
         if context not in S.CONTEXTS:
             raise ValueError("unknown context")
         cmd += ["--context", str(context)]
+    data = data_dir_arg(data_dir)
+    if data:
+        cmd += ["--data-dir", data]
     return Job("install", cmd, {"family": family, "model": model, "source": source})
 
 
+# owner/name as ModelScope and Hugging Face name repositories: no path tricks (".."), nothing to read as an option
+REPO_NAME = re.compile(r"^[A-Za-z0-9][\w.-]*/[A-Za-z0-9][\w.-]*$")
+
+
+def llama():
+    """serve/llama_models.py: any GGUF model through llama.cpp (imported when first asked)."""
+    from serve import llama_models
+    return llama_models
+
+
+def llama_variants(repo: str, source: str, data_dir: str | None = None) -> dict:
+    """A repository's GGUF variants, each with whether it runs on this PC (llama-server places what fits in VRAM there
+    and the rest in RAM)."""
+    if not REPO_NAME.match(repo):
+        raise ValueError("a repository is owner/name")
+    if source not in S.SOURCES:
+        raise ValueError("unknown download source")
+    hw = hardware()
+    vram = max((g["vram_gb"] for g in hw["gpus"] if g["problem"] is None and g["vendor"] == "nvidia"), default=0.0)
+    src = S.model_source() if source == "auto" else source
+    vs = llama().variants(repo, src)
+    free = folder_info(data_dir)["free_gb"] if data_dir else hw["free_gb"]
+    root = llama().models_root(data_dir)
+    for v in vs:
+        v["fit"] = llama().fit(v["gb"], hw["ram_gb"], vram)
+        v["left_gb"] = round(llama().left_gb(v, root / llama().model_key(repo, v["name"])), 2)
+        v["files"] = len(v["files"])
+        v["disk"] = free is not None and v["left_gb"] > 0 and free < v["left_gb"] + 2
+    return {"repo": repo, "source": src, "variants": vs, "free_gb": free}
+
+
+def llama_install(repo: str, variant: str, source: str, context: int | None, data_dir: str | None = None) -> Job:
+    if not REPO_NAME.match(repo) or not variant or any(c in variant for c in "\r\n"):
+        raise ValueError("repository or variant")
+    if source not in S.SOURCES:
+        raise ValueError("unknown download source")
+    cmd = [sys.executable, str(ROOT / "serve" / "llama_models.py"), "install", repo, variant, "--source", source]
+    if context:
+        cmd += ["--context", str(int(context))]
+    data = data_dir_arg(data_dir)
+    if data:
+        cmd += ["--data-dir", data]
+    return Job("install", cmd, {"family": "llama.cpp", "model": variant.rsplit("/", 1)[-1], "repo": repo})
+
+
+def host_args() -> list[str]:
+    return [] if LISTEN_HOST in ("127.0.0.1", "localhost") else ["--host", LISTEN_HOST]
+
+
 def start_model(key: str) -> Job:
-    """The model's server, as its run-<model> script starts it (serve/server.py with its run config)."""
+    """The model's server, as its run-<model> script starts it (serve/server.py with its run config; a llama.cpp
+    model, "llama/<key>": serve/llama_front.py with its llama-<key>.json)."""
+    if key.startswith("llama/"):
+        cfg = llama().installed().get(key[len("llama/"):])
+        if not cfg:
+            raise ValueError("not installed")
+        cmd = [sys.executable, str(ROOT / "serve" / "llama_front.py"), "--config", str(ROOT / cfg["config"]),
+               "--port", str(cfg["port"]), *host_args()]
+        return Job("start", cmd, {"key": key, "model_name": cfg["model_name"], "port": cfg["port"]})
     cfg = installed().get(key)
     if not cfg:
         raise ValueError("not installed")
     cmd = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(ROOT / cfg["config"]),
-           "--port", str(cfg["port"])]
+           "--port", str(cfg["port"]), *host_args()]
     return Job("start", cmd, {"key": key, "model_name": cfg["model_name"], "port": cfg["port"]})
 
 
@@ -304,7 +391,7 @@ def running_ports() -> list[int]:
     """The ports where a Strata model answers on this PC (the installed models' ports and the default 8080): its chat
     page can be opened from here, however it was started."""
     import urllib.request
-    ports = sorted({8080, *(c["port"] for c in installed().values())})
+    ports = sorted({8080, *(c["port"] for c in installed().values()), *(c["port"] for c in llama().installed().values())})
     out = []
     for p in ports:
         try:
@@ -334,12 +421,26 @@ def api(method: str, url: str, raw: bytes | None, embedded: bool = False) -> tup
                 return 200, hardware("refresh" in q)
             if what == "models":
                 num = lambda k: float(q[k]) if q.get(k, "").replace(".", "", 1).isdigit() else None   # noqa: E731
-                return 200, {"models": catalog(hardware(), num("ram"), num("vram")), "installed": installed()}
+                hw = hardware()
+                if q.get("dir"):
+                    from urllib.parse import unquote
+                    hw = {**hw, "free_gb": folder_info(unquote(q["dir"]))["free_gb"]}
+                return 200, {"models": catalog(hw, num("ram"), num("vram")), "installed": installed()}
             if what == "sources":
                 ms, hf = S.reachable(S.ms_endpoint()), S.reachable(S.HF_PROBE)
                 return 200, {"modelscope": ms, "huggingface": hf, "auto": "modelscope" if ms else "huggingface" if hf else None}
             if what == "running":
                 return 200, {"ports": running_ports()}
+            if what == "llama/models":                   # the llama.cpp section: suggestions and what is installed
+                return 200, {"suggested": [{"repo": r, "title": t, "about": a} for r, t, a in llama().SUGGESTED],
+                             "installed": llama().installed(), "build": llama().LLAMA_BUILD}
+            if what == "llama/variants":
+                from urllib.parse import unquote
+                return 200, llama_variants(unquote(q.get("repo", "")).strip(), unquote(q.get("source", "auto")),
+                                           unquote(q.get("dir", "")) or None)
+            if what == "folder":
+                from urllib.parse import unquote
+                return 200, folder_info(unquote(q.get("path", "")) or None)
             if what == "job":
                 with LOCK:
                     return 200, {k: j.state() for k, j in JOBS.items()}
@@ -353,11 +454,17 @@ def api(method: str, url: str, raw: bytes | None, embedded: bool = False) -> tup
                 raise ValueError("source")
             return 200, inspect(src, (body.get("variant") or "").strip() or None)
         with LOCK:
-            if what in ("install", "start") and any(j.code is None for j in JOBS.values()):
+            if what in ("install", "start", "llama/install") and any(j.code is None for j in JOBS.values()):
                 return 409, {"error": "busy"}
+            if what == "llama/install":
+                JOBS["install"] = llama_install(str(body.get("repo") or "").strip(), str(body.get("variant") or ""),
+                                                str(body.get("source") or "auto"), body.get("context"),
+                                                body.get("data_dir"))
+                return 200, JOBS["install"].state()
             if what == "install":
                 JOBS["install"] = install(str(body.get("family")), str(body.get("model")),
-                                          str(body.get("source") or "auto"), body.get("context"))
+                                          str(body.get("source") or "auto"), body.get("context"),
+                                          body.get("data_dir"))
                 return 200, JOBS["install"].state()
             if what == "start":
                 if running_ports():                     # one model at a time: the GPU holds one
@@ -404,8 +511,8 @@ class Server(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def handler(port: int):
-    hosts = {"127.0.0.1", "localhost"}               # any port: an SSH tunnel may forward another one
+def handler(port: int, extra_hosts=()):
+    hosts = {"127.0.0.1", "localhost", *extra_hosts}  # any port: an SSH tunnel may forward another one
     name = lambda h: h.rsplit(":", 1)[0] if h.count(":") == 1 else h   # noqa: E731  ("127.0.0.1:8090" -> "127.0.0.1")
 
     class H(BaseHTTPRequestHandler):
@@ -470,13 +577,47 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=8090)
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="the address to listen on; 0.0.0.0 (or this PC's LAN address) lets other PCs of the network "
+                         "open the page - and install and start models here: only on a network you trust")
     a = ap.parse_args(argv)
-    srv = Server(("127.0.0.1", a.port), handler(a.port))
-    threading.Thread(target=hardware, daemon=True).start()   # ready before the page asks
+    extra = ()
+    if a.host not in ("127.0.0.1", "localhost"):
+        from serve.server import host_names_for, lan_addresses
+        extra = host_names_for(a.host)                 # this PC's name and LAN addresses
+        print(f"[manager] listening on {a.host}: other PCs of the network can open it, and install and start "
+              f"models here", flush=True)
+        lan = [a.host] if a.host not in ("0.0.0.0", "::") else sorted(lan_addresses())
+        for ip in lan:
+            print(f"From another PC: http://{ip}:{a.port}/", flush=True)
+    global LISTEN_HOST
+    LISTEN_HOST = a.host
     url = f"http://127.0.0.1:{a.port}/"
-    print(f"Strata model manager: {url}  (Ctrl+C to stop)", flush=True)
-    if not a.no_browser:
+    # no screen (a Linux server over SSH): webbrowser would start a text browser in this terminal, if any
+    browser = not a.no_browser and (WIN or sys.platform == "darwin" or bool(os.environ.get("DISPLAY")
+                                                                            or os.environ.get("WAYLAND_DISPLAY")))
+    try:                                               # TokenRun.exe double-clicked again: the page that runs
+        with urllib.request.urlopen(url + "manage/api/context", timeout=3) as r:
+            running = json.loads(r.read()).get("embedded") is False
+    except Exception:                                  # (Windows lets a second server bind the same port)
+        running = None
+    if running:
+        print(f"TokenRun model manager is already running: {url}", flush=True)
+        if browser:
+            webbrowser.open(url)
+        return 0
+    if running is False:
+        print(f"Port {a.port} is used by another program: start the model manager on another one, e.g. --port "
+              f"{a.port + 1}", flush=True)
+        return 1
+    srv = Server((a.host, a.port), handler(a.port, extra))
+    threading.Thread(target=hardware, daemon=True).start()   # ready before the page asks
+    print(f"TokenRun model manager: {url}  (Ctrl+C to stop)", flush=True)
+    if browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    elif not a.no_browser and a.host in ("127.0.0.1", "localhost"):
+        print("No screen here: open it from another PC with --host 0.0.0.0 (then http://<this PC>:"
+              f"{a.port}/), or through an SSH tunnel: ssh -L {a.port}:127.0.0.1:{a.port} <this PC>", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

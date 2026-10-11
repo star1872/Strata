@@ -1,4 +1,11 @@
-# Strata 老平台分支（oldhw）
+# TokenRun
+
+作者：**星辰**（[star1872](https://github.com/star1872)）· 联系方式见文末。
+
+TokenRun 基于 [Niko1221/Strata](https://github.com/Niko1221/Strata)（MIT 许可证，版权归 Niko1221，原文见 `LICENSE`）。
+引擎仍是 Strata；TokenRun 是在它之上的中文网页、模型管理和 llama.cpp 后端。
+
+## 老平台分支（oldhw）
 
 这是 [Niko1221/Strata](https://github.com/Niko1221/Strata) 的一个分支，针对国内常见的老平台：
 X99 主板 + 二手至强（只有 AVX2）+ DDR3/DDR4 + RTX 30/40 系显卡 + PCIe 3.0。
@@ -63,7 +70,7 @@ UD-Q4_K_XL 各提示词（官方路径 → 本分支）：作文 15.3 → 19.0�
    `--adapt-every 1 --adapt-swaps 160 --adapt-decay 0.97`。慢内存机器上 CPU 少算约 30% 的专家。+7.9%。
 4. **默认从 ModelScope 下载**（上游 PR #908）：国内直接下载全部模型文件，每个文件按 ModelScope 公布的 SHA-256 校验；
    ModelScope 不通时退回 Hugging Face。`--source huggingface` 可强制用 Hugging Face。
-5. **`--inspect`**（上游 PR #911，基于 [quantscope](https://github.com/1872183316/quantscope)）：只读文件头（几 MB），
+5. **`--inspect`**（上游 PR #911，基于 [quantscope](https://github.com/star1872/quantscope)）：只读文件头（几 MB），
    查出一个 GGUF 的真实 bit 数，并判断 Strata 能不能跑；安装菜单显示各版本专家的真实 bit 数。
 6. **PCIe 检查**（上游 PR #912）：第 1 步显示显卡的 PCIe 代数和宽度，插错槽少了 lane 时警告。
 
@@ -84,7 +91,7 @@ UD-Q4_K_XL 各提示词（官方路径 → 本分支）：作文 15.3 → 19.0�
 本分支改了引擎，setup 下载的官方预编译引擎里没有这些改动，所以要编译：
 
 ```bash
-git clone -b oldhw https://github.com/1872183316/Strata.git
+git clone -b oldhw https://github.com/star1872/Strata.git
 cd Strata
 ./setup.sh --build --model IQ3_S        # 或 --model Q2_0；--source 默认 auto（ModelScope 优先）
 ```
@@ -118,3 +125,13 @@ Windows：本分支没在 Windows 上测过。
 
 #706（Q2_0 内核）、#764（交换延迟生效）、#907（calibrate 测自适应缓存）、#908（ModelScope）、#911（`--inspect`）、
 #912（PCIe 检查）、#913（测试报告）。截至 2026-10-06，#906～#913 还没有维护者回复。
+
+## 作者与联系方式
+
+TokenRun（本分支的网页、模型管理、llama.cpp 后端、安装包和老平台优化）由 **星辰**（GitHub
+[star1872](https://github.com/star1872)）开发并开源；引擎和原始代码来自 [Niko1221/Strata](https://github.com/Niko1221/Strata)。
+
+- **使用问题**：请在 GitHub 提 [Issue](https://github.com/star1872/Strata/issues)，公开回答，其他人也能看到。个人精力有限，不提供一对一的免费技术支持。
+- **商务合作、定制开发**：邮箱 cloud17778@outlook.com，或加微信（请注明来意）：
+
+<img src="docs/media/wechat-qr.png" width="273" alt="星辰的微信二维码">

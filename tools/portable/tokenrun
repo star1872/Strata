@@ -1,0 +1,7 @@
+#!/bin/sh
+# tokenrun - the Linux package's command (install.sh links it into ~/.local/bin): the model manager page,
+# app/serve/setup_web.py, with the Python inside the package.  Options go to the page, e.g.
+#   tokenrun --host 0.0.0.0     (open it from another PC of a network you trust)
+#   tokenrun --port 8091 --no-browser
+here=$(dirname "$(readlink -f "$0")")
+exec "$here/python/bin/python3" "$here/app/serve/setup_web.py" "$@"

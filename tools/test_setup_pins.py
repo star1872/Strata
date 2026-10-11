@@ -16,6 +16,7 @@ import unittest
 import urllib.error
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -186,7 +187,7 @@ class Engine(unittest.TestCase):
     def test_bases(self):
         # the fork's own engine first (its ModelScope copy next), then the official release of the same version,
         # then the official latest
-        gh = ["https://github.com/1872183316/Strata/releases/download/oldhw-v0.1.31/",
+        gh = ["https://github.com/star1872/Strata/releases/download/oldhw-v0.1.31/",
               "https://github.com/Niko1221/Strata/releases/download/v0.1.31/", setup.UPSTREAM_PREBUILT_URL]
         self.assertEqual(setup.prebuilt_bases(setup.PREBUILT_URL), gh[:1] + [self.MS] + gh[1:])
         # mainland China: the ModelScope copy first
@@ -213,7 +214,7 @@ class Engine(unittest.TestCase):
                     self.assertIn("does not match its SHA-256", out)
 
     def test_the_fork_s_release_first(self):
-        tag = "https://github.com/1872183316/Strata/releases/download/oldhw-v0.1.31/"
+        tag = "https://github.com/star1872/Strata/releases/download/oldhw-v0.1.31/"
         eng, out, heads, got = self.run_get([tag, setup.UPSTREAM_PREBUILT_URL])
         self.assertEqual(eng, self.root / "engine")
         self.assertEqual(got, [tag + setup.PREBUILT_ASSET])
@@ -277,17 +278,40 @@ class Requirements(unittest.TestCase):
         self.assertEqual(setup.req_name('numpy==2.5.3; python_version >= "3.12"'), "numpy")
         self.assertEqual(setup.req_name("charset_normalizer==3"), "charset-normalizer")
 
-    def pip(self, stamp, packages, installed=()):
+    def pip(self, stamp, packages, installed=(), source="huggingface", fails=0):
         ran = []
+
+        def run(cmd, check=True, **kw):                 # the first `fails` pip runs fail
+            ran.append(cmd)
+            code = 1 if len(ran) <= fails else 0
+            if code and check:
+                raise SystemExit(1)
+            return SimpleNamespace(returncode=code)
         with tempfile.TemporaryDirectory() as d:
             if stamp is not None:
                 (Path(d) / ".strata-pip.json").write_text(json.dumps(stamp))
             with mock.patch.object(setup.sys, "prefix", d), \
-                    mock.patch.object(setup, "run", lambda cmd, **kw: ran.append(cmd)), \
+                    mock.patch.object(setup, "run", run), \
+                    mock.patch.object(setup, "model_source", lambda: source), \
+                    mock.patch.dict(setup.os.environ, {"PIP_INDEX_URL": ""}), \
                     mock.patch.object(setup, "_installed", lambda name: name in installed):
                 quiet(setup.pip_install, packages, "the packages")
             after = json.loads((Path(d) / ".strata-pip.json").read_text()) if ran else stamp
-        return [c for cmd in ran for c in cmd if "==" in c or c in setup.PY_PACKAGES], after
+        self.indexes = [cmd[cmd.index("--index-url") + 1] if "--index-url" in cmd else "pypi" for cmd in ran]
+        return [c for cmd in ran[-1:] for c in cmd if "==" in c or c in setup.PY_PACKAGES], after
+
+    def test_pypi_first_then_the_mirrors(self):
+        lines = setup.requirement_lines()
+        ran, stamp = self.pip(None, lines, fails=1)
+        self.assertEqual(self.indexes, ["pypi", setup.PIP_MIRRORS[0]])
+        self.assertEqual((ran, sorted(stamp)), (lines, sorted(lines)))
+
+    def test_mirrors_first_in_china(self):                # ModelScope as the model source: pypi.org last
+        lines = setup.requirement_lines()
+        self.pip(None, lines, source="modelscope")
+        self.assertEqual(self.indexes, setup.PIP_MIRRORS[:1])
+        self.pip(None, lines, source="modelscope", fails=2)
+        self.assertEqual(self.indexes, setup.PIP_MIRRORS + ["pypi"])
 
     def test_fresh_install_gets_every_pin(self):
         lines = setup.requirement_lines()
@@ -310,6 +334,24 @@ class Requirements(unittest.TestCase):
         old = [x.replace("tqdm==4.70.1", "tqdm==4.60.0") for x in lines]
         ran, _ = self.pip(old, lines)
         self.assertEqual(ran, ["tqdm==4.70.1"])
+
+
+class Certificates(unittest.TestCase):
+    """Windows: certifi's root certificates join the system's (a fresh cloud Windows failed github.com, 2026-10-11)."""
+
+    def test_windows_sets_certifi(self):
+        import certifi
+        with mock.patch.object(setup.os, "name", "nt"), mock.patch.dict(setup.os.environ, {}, clear=True):
+            setup._trust_certifi()
+            self.assertEqual(setup.os.environ.get("SSL_CERT_FILE"), certifi.where())
+
+    def test_own_setting_and_other_systems_kept(self):
+        with mock.patch.object(setup.os, "name", "nt"), mock.patch.dict(setup.os.environ, {"SSL_CERT_FILE": "mine.pem"}):
+            setup._trust_certifi()
+            self.assertEqual(setup.os.environ["SSL_CERT_FILE"], "mine.pem")
+        with mock.patch.object(setup.os, "name", "posix"), mock.patch.dict(setup.os.environ, {}, clear=True):
+            setup._trust_certifi()
+            self.assertNotIn("SSL_CERT_FILE", setup.os.environ)
 
 
 if __name__ == "__main__":

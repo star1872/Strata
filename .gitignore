@@ -36,6 +36,9 @@ td.log
 /run-*.sh
 /strata-*.json
 /strata-*.log
+/llama-*.json
+/llama-*.log
+/llama-*.shared.json
 /build-strata.bat
 /build-strata-cuda12.bat
 /build-cuda12/
@@ -49,6 +52,8 @@ build-vision-cuda12.bat
 # setup.py outputs (engine, downloads) and release builds
 /engine/
 /engine-cuda12/
+/engine-llama/
+/_mirror.tmp
 /build-release*/
 /dist/
 *.done

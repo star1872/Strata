@@ -1,0 +1,196 @@
+"""serve/llama_models.py (any GGUF model through llama.cpp) and its part of the model manager (serve/setup_web.py):
+which official llama.cpp build a PC takes, whether a size runs here, the names and configs it writes, and the
+manager's checks on what a page may ask for.  No network: the hub listing is replaced.
+
+Run: python -m unittest serve.test_llama_models
+"""
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from serve import llama_models as LM  # noqa: E402
+from serve import setup_web as W  # noqa: E402
+
+
+class Engine(unittest.TestCase):
+    def test_kind_by_driver(self):
+        self.assertEqual(LM.engine_kind([{"vendor": "nvidia", "driver": "610.47"}]), "cuda13")
+        self.assertEqual(LM.engine_kind([{"vendor": "nvidia", "driver": "580.65"}]), "cuda13")
+        self.assertEqual(LM.engine_kind([{"vendor": "nvidia", "driver": "552.22"}]), "cuda12")
+        self.assertEqual(LM.engine_kind([{"vendor": "amd", "driver": "amdgpu"}]), "vulkan")
+        self.assertEqual(LM.engine_kind([]), "cpu")
+
+    def test_assets_are_the_published_names(self):
+        # names as ggml-org publishes them (release b11457, checked 2026-10-07); the CUDA runtime comes apart
+        with mock.patch.object(LM, "WIN", True):
+            self.assertEqual(LM.engine_assets("cuda13", "b11457"),
+                             ["llama-b11457-bin-win-cuda-13.4-x64.zip", "cudart-llama-bin-win-cuda-13.4-x64.zip"])
+            self.assertEqual(LM.engine_assets("cpu", "b11457"), ["llama-b11457-bin-win-cpu-x64.zip"])
+        with mock.patch.object(LM, "WIN", False):
+            self.assertEqual(LM.engine_assets("cuda12", "b11457"),
+                             ["llama-b11457-bin-ubuntu-cuda-12.8-x64.tar.gz",
+                              "cudart-llama-b11457-bin-ubuntu-cuda-12.8-x64.tar.gz"])
+
+    def test_modelscope_copy_first_in_mainland_china(self):
+        with mock.patch.object(LM.S, "model_source", lambda: "modelscope"):
+            urls = LM.asset_urls("x.zip", "b1")
+        self.assertIn("modelscope", urls[0])
+        self.assertTrue(urls[0].endswith("/llama.cpp/b1/x.zip"))
+        self.assertTrue(urls[1].startswith("https://github.com/ggml-org/llama.cpp/releases/download/b1/"))
+        with mock.patch.object(LM.S, "model_source", lambda: "huggingface"):
+            self.assertIn("github.com", LM.asset_urls("x.zip", "b1")[0])
+
+
+    def test_cuda_runtime_beside_the_server(self):
+        # the Linux archives: llama-<b>/ with llama-server and libggml-cuda.so, cudart-...-x64/ with the runtime
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "llama-b1").mkdir()
+            (root / "llama-b1" / "libggml-cuda.so").write_bytes(b"x")
+            (root / "cudart-llama-b1-bin-ubuntu-cuda-13.4-x64").mkdir()
+            for n in ("libcudart.so.13", "libcublas.so.13", "libcublasLt.so.13", "README.md"):
+                (root / "cudart-llama-b1-bin-ubuntu-cuda-13.4-x64" / n).write_bytes(b"x")
+            moved = LM.gather_runtime(root, root / "llama-b1")
+            self.assertEqual(sorted(moved), ["libcublas.so.13", "libcublasLt.so.13", "libcudart.so.13"])
+            self.assertTrue((root / "llama-b1" / "libcudart.so.13").exists())
+            self.assertTrue((root / "cudart-llama-b1-bin-ubuntu-cuda-13.4-x64" / "README.md").exists())
+
+    def test_disk_need_counts_only_what_is_left(self):
+        # an install run again (or resumed) needs no room for the files it already has (llmserver, 2026-10-07:
+        # 22 GB there, 12 GB free, and the install stopped at "need ~24 GB")
+        v = {"files": [{"path": "a/m-00001.gguf", "size": 3000}, {"path": "a/m-00002.gguf", "size": 2000},
+                       {"path": "a/m-00003.gguf", "size": 1000}]}
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d)
+            (dest / "m-00001.gguf").write_bytes(b"x" * 3000)          # finished
+            (dest / "m-00002.gguf.part").write_bytes(b"x" * 500)       # half-way
+            self.assertAlmostEqual(LM.left_gb(v, dest) * 1e9, 2500)
+
+    def test_an_archive_put_there_by_hand_is_used(self):
+        # GitHub's downloads time out from mainland China (llmserver, 2026-10-07): an archive copied into the engine
+        # folder is unpacked without asking the network
+        import io
+        import tarfile
+        import zipfile
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(LM, "ROOT", Path(d)), \
+                mock.patch.object(LM.S, "reachable", lambda *a, **k: self.fail("asked the network")), \
+                mock.patch.object(LM.S, "download", lambda *a, **k: self.fail("downloaded")), \
+                mock.patch.object(LM.S, "ok", lambda *a: None), mock.patch.object(LM.S, "say", lambda *a: None):
+            folder = LM.engine_dir("cpu", "b1")
+            folder.mkdir(parents=True)
+            (asset,) = LM.engine_assets("cpu", "b1")
+            if asset.endswith(".zip"):
+                with zipfile.ZipFile(folder / asset, "w") as z:
+                    z.writestr(LM.SERVER_EXE, b"x")
+            else:
+                with tarfile.open(folder / asset, "w:gz") as t:
+                    info = tarfile.TarInfo(f"llama-b1/{LM.SERVER_EXE}")
+                    info.size = 1
+                    t.addfile(info, io.BytesIO(b"x"))
+            exe = LM.get_engine([], "b1")
+            self.assertEqual(exe.name, LM.SERVER_EXE)
+            self.assertFalse((folder / asset).exists())
+
+
+class Fit(unittest.TestCase):
+    def test_where_it_goes(self):
+        self.assertEqual(LM.fit(10, 64, 16)["where"], "gpu")
+        v = LM.fit(22, 64, 16)
+        self.assertEqual((v["level"], v["where"]), ("ok", "gpu+ram"))
+        self.assertEqual(LM.fit(60, 64, 16)["level"], "slow")            # needs most of the RAM
+        v = LM.fit(120, 64, 16)
+        self.assertEqual((v["level"], v["where"]), ("no", "ssd"))
+        self.assertEqual(v["need_ram"], round(120 - (16 - LM.VRAM_LEFT_GB) + LM.RAM_LEFT_GB))
+
+    def test_no_gpu(self):
+        self.assertEqual(LM.fit(0.6, 12, 0), {"level": "slow", "where": "cpu"})
+        self.assertEqual(LM.fit(10, 12, 0)["where"], "ssd")
+
+
+class Names(unittest.TestCase):
+    def test_key(self):
+        self.assertEqual(LM.model_key("unsloth/Qwen3.6-35B-A3B-GGUF", "Qwen3.6-35B-A3B-UD-Q4_K_XL"),
+                         "qwen3.6-35b-a3b-ud-q4_k_xl")
+        self.assertEqual(LM.model_key("unsloth/Qwen3.6-35B-A3B-GGUF", "BF16/Qwen3.6-35B-A3B-BF16"),
+                         "qwen3.6-35b-a3b-bf16")
+        self.assertEqual(LM.model_key("Qwen/Qwen3-0.6B-GGUF", "Qwen3-0.6B-Q8_0"), "qwen3-0.6b-q8_0")
+
+    def test_variants_group_shards_and_skip_projectors(self):
+        files = [LM.QS.Source(n, s) for n, s in (("BF16/M-BF16-00001-of-00002.gguf", 5e9), ("BF16/M-BF16-00002-of-00002.gguf", 5e9),
+                                                 ("M-Q4_K_M.gguf", 3e9), ("mmproj-F16.gguf", 1e9), ("README.md", 1))]
+        with mock.patch.object(LM, "hub_files", lambda repo, source: files):
+            vs = LM.variants("o/M-GGUF", "modelscope")
+        self.assertEqual([(v["label"], len(v["files"]), v["gb"]) for v in vs], [("M-Q4_K_M", 1, 3.0), ("M-BF16", 2, 10.0)])
+
+
+class Installed(unittest.TestCase):
+    def test_only_llama_configs(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(LM, "ROOT", Path(d)):
+            (Path(d) / "llama-a.json").write_text(json.dumps({"backend": "llamacpp", "model_name": "a", "port": 8081,
+                                                              "repo": "o/r", "variant": "v", "gb": 1.5}))
+            (Path(d) / "llama-b.json").write_text("{not json")
+            (Path(d) / "llama-c.json").write_text(json.dumps({"backend": "other"}))
+            self.assertEqual(list(LM.installed()), ["a"])
+            self.assertEqual(LM.installed()["a"]["port"], 8081)
+
+
+class Manager(unittest.TestCase):
+    def test_repo_and_variant_are_checked(self):
+        for repo in ("../x", "a/b/c", "a b/c", ""):
+            code, body = W.api("POST", "/manage/api/llama/install", json.dumps({"repo": repo, "variant": "v"}).encode())
+            self.assertEqual(code, 400, repo)
+        code, _ = W.api("POST", "/manage/api/llama/install", json.dumps({"repo": "o/r", "variant": "v\n--x"}).encode())
+        self.assertEqual(code, 400)
+        code, _ = W.api("GET", "/manage/api/llama/variants?repo=..%2Fx", None)
+        self.assertEqual(code, 400)
+
+    def test_install_runs_the_installer(self):
+        with mock.patch.object(W, "Job", lambda kind, cmd, what: mock.Mock(cmd=cmd, what=what, code=None,
+                                                                           state=lambda: {"kind": kind})):
+            W.JOBS.clear()
+            code, _ = W.api("POST", "/manage/api/llama/install",
+                            json.dumps({"repo": "unsloth/Qwen3.6-35B-A3B-GGUF", "variant": "Qwen3.6-35B-A3B-UD-Q4_K_XL",
+                                        "source": "modelscope", "context": 16384}).encode())
+            job = W.JOBS.pop("install")
+        self.assertEqual(code, 200)
+        self.assertEqual(job.cmd[1:], [str(W.ROOT / "serve" / "llama_models.py"), "install",
+                                       "unsloth/Qwen3.6-35B-A3B-GGUF", "Qwen3.6-35B-A3B-UD-Q4_K_XL", "--source",
+                                       "modelscope", "--context", "16384"])
+
+    def test_download_folder(self):
+        self.assertIsNone(W.data_dir_arg(""))
+        for bad in ("models", "-x", "/data/a\nb", "../x"):
+            with self.assertRaises(ValueError, msg=bad):
+                W.data_dir_arg(bad)
+        with tempfile.TemporaryDirectory() as d:
+            info = W.folder_info(str(Path(d) / "new" / "models"))
+            self.assertEqual((info["exists"], info["writable"]), (False, True))
+            self.assertGreater(info["free_gb"], 0)
+            with mock.patch.object(W, "Job", lambda kind, cmd, what: mock.Mock(cmd=cmd, code=None, state=dict)):
+                W.JOBS.clear()
+                W.api("POST", "/manage/api/llama/install", json.dumps({"repo": "o/r", "variant": "v", "data_dir": d}).encode())
+                llama_cmd = W.JOBS.pop("install").cmd
+                W.api("POST", "/manage/api/install", json.dumps({"family": "qwen", "model": "Q2_0", "data_dir": d}).encode())
+                strata_cmd = W.JOBS.pop("install").cmd
+        self.assertEqual(llama_cmd[-2:], ["--data-dir", str(Path(d).resolve())])
+        self.assertEqual(strata_cmd[-2:], ["--data-dir", str(Path(d).resolve())])
+
+    def test_start_a_llama_model(self):
+        with mock.patch.object(LM, "installed", lambda: {"m": {"config": "llama-m.json", "model_name": "m", "port": 8085}}), \
+                mock.patch.object(W, "Job", lambda kind, cmd, what: (kind, cmd, what)):
+            kind, cmd, what = W.start_model("llama/m")
+        self.assertEqual(kind, "start")
+        self.assertEqual(cmd[1:], [str(W.ROOT / "serve" / "llama_front.py"), "--config", str(W.ROOT / "llama-m.json"),
+                                   "--port", "8085"])
+        with self.assertRaises(ValueError):
+            W.start_model("llama/none")
+
+
+if __name__ == "__main__":
+    unittest.main()

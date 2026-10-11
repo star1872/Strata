@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Strata</title>
+<title>TokenRun</title>
 <link rel="stylesheet" href="web/tokens.css">
 <link rel="stylesheet" href="web/components.css">
 <link rel="stylesheet" href="web/app.css">
@@ -21,7 +21,7 @@
   <button class="st-btn st-btn--icon" id="convs-btn" title="Show or hide the chat list" aria-label="Show or hide the chat list"
           data-i18n-attr="title,aria-label" aria-controls="convs" aria-expanded="true">
     <svg class="st-icon"><use href="web/sprite.svg#i-sidebar"/></svg></button>
-  <span class="st-header__brand">Strata</span>
+  <span class="st-header__brand">TokenRun</span>
   <nav class="st-tabs" role="tablist" aria-label="Views" data-i18n-attr="aria-label">
     <a class="st-tab" id="tab-btn-manage" href="manage">
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-layers"/></svg><span data-i18n>Models</span></a>
@@ -30,7 +30,7 @@
     <button class="st-tab" role="tab" id="tab-btn-monitor" aria-controls="view-monitor" aria-selected="false" data-tab="monitor">
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-activity"/></svg><span data-i18n>Monitor</span></button>
     <button class="st-tab" role="tab" id="tab-btn-about" aria-controls="view-about" aria-selected="false" data-tab="about">
-      <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-info"/></svg><span data-i18n>About</span></button>
+      <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-settings"/></svg><span data-i18n>Settings</span></button>
   </nav>
   <span class="st-header__spacer"></span>
   <span class="st-pill" id="pill" data-state="idle" role="status" aria-live="polite">
@@ -40,6 +40,7 @@
   <button class="st-btn st-btn--icon" id="theme-btn" title="Light / dark" aria-label="Switch between light and dark"
           data-i18n-attr="title,aria-label">
     <svg class="st-icon"><use id="theme-icon" href="web/sprite.svg#i-moon"/></svg></button>
+  <a class="st-author" href="https://github.com/star1872" target="_blank" rel="noopener noreferrer" title="The author's GitHub page" data-i18n-attr="title"><span data-i18n>Author:</span>星辰</a>
 </header>
 
 <main>
@@ -207,7 +208,7 @@
         </details>
       </div>
       <div class="st-card">
-        <span class="card-title" data-i18n>Settings</span>
+        <span class="card-title" data-i18n>General</span>
         <div class="st-field">
           <label class="st-label" for="lang-select"><span data-i18n>Language</span></label>
           <select class="st-input" id="lang-select"></select>
@@ -219,12 +220,13 @@
         <div class="toggle-row"><span data-i18n>Dark theme</span>
           <button class="st-toggle" id="dark-toggle" role="switch" aria-checked="false" aria-label="Dark theme" data-i18n-attr="aria-label"></button></div>
         <p class="muted small"><span data-i18n>Chats, settings and the key are kept in this browser only.</span>
-          <a href="https://github.com/Niko1221/Strata" target="_blank" rel="noopener noreferrer" data-i18n>Strata on GitHub</a></p>
+          <a href="https://github.com/Niko1221/Strata" target="_blank" rel="noopener noreferrer" data-i18n>Based on Strata (GitHub)</a></p>
+        <p class="muted small"><span data-i18n>TokenRun by</span> <a href="https://github.com/star1872/Strata" target="_blank" rel="noopener noreferrer">星辰 (star1872)</a> · <span data-i18n>business:</span> <a href="mailto:cloud17778@outlook.com">cloud17778@outlook.com</a></p>
       </div>
       <div class="st-card cfg-card" id="cfg-card" hidden>
         <div class="req-head"><span class="card-title" data-i18n>Model settings</span><span class="muted small" id="cfg-file"></span></div>
         <p class="muted small" data-i18n>Kept in the model's run config for every client. An empty field is the default. They
-          take effect the next time the model starts (close Strata's window and start it again).</p>
+          take effect the next time the model starts (close TokenRun's window and start it again).</p>
         <form class="cfg-form" id="cfg-form"></form>
         <div class="cfg-actions"><button class="st-btn st-btn--primary" id="cfg-save" type="button" data-i18n>Save</button>
           <span class="muted small" id="cfg-msg" role="status"></span></div>

@@ -1,0 +1,26 @@
+# The official llama.cpp builds the llama.cpp backend installs (serve/llama_models.py LLAMA_BUILD), copied from
+# ggml-org's GitHub release to this fork's ModelScope repository (llama.cpp/<build>/), which mainland China reaches
+# when GitHub's downloads do not.  Archives already there are skipped; without MODELSCOPE_TOKEN nothing happens.
+name: llama.cpp mirror (oldhw)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [oldhw]
+    paths: ["serve/llama_models.py", ".github/workflows/llama-mirror.yml"]
+
+jobs:
+  mirror:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - name: copy on ModelScope
+        env:
+          MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_TOKEN }}
+          MODELSCOPE_REPO: ${{ vars.MODELSCOPE_REPO }}
+        run: |
+          python -m pip install "modelscope-hub==0.4.5"
+          python tools/ci_package.py llama-mirror

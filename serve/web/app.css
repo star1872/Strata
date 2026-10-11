@@ -12,6 +12,12 @@ main { flex: 1; min-height: 0; display: flex; }
 .st-header { position: relative; z-index: 2; flex: none; }
 .st-header .st-tabs { margin-left: var(--st-s-4); }
 .st-tab, .st-pill { white-space: nowrap; }
+.st-author { color: var(--st-ink-muted); font-size: var(--st-fs-sm); white-space: nowrap; text-decoration: none;
+             margin-left: var(--st-s-3); }
+.job-actions { display: flex; gap: var(--st-s-2); align-items: center; }
+.st-author:hover { color: var(--st-ink); text-decoration: underline; }
+html:not(:lang(zh)) .st-author > span { margin-right: .3em; }   /* "Author: 星辰"; Chinese needs no space */
+@media (max-width: 640px) { .st-author { display: none; } }
 #drawer-close .st-icon { transform: rotate(-90deg); }
 
 /* ---------------------------------------------------------------- chat */
@@ -300,3 +306,6 @@ body.setup-page { overflow: auto; height: auto; }
   .size { flex-direction: column; }
   .size__side { flex-direction: row; align-items: center; }
 }
+
+/* the model manager's engine switch (Strata's model / llama.cpp models) */
+.model-tabs { display: inline-flex; flex-wrap: wrap; margin: 4px 0 12px; }
