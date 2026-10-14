@@ -1,3 +1,5 @@
+> **TokenRun 已迁到独立仓库：https://github.com/star1872/TokenRun**（下载、提问和新版本都在那里）。本仓库只保留，用于给上游 Strata 提 PR。
+
 # TokenRun
 
 作者：**星辰**（[star1872](https://github.com/star1872)）· 联系方式见文末。

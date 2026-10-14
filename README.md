@@ -1,3 +1,5 @@
+> **TokenRun has moved to its own repository: https://github.com/star1872/TokenRun** (downloads, issues and new versions). This fork stays for pull requests to Strata.
+
 > **This is the `oldhw` branch of a fork** (older PCs: Haswell Xeon, DDR3, PCIe 3.0; +15% decode measured, see
 > Niko1221/Strata#906). 中文说明：[README.oldhw.zh-CN.md](README.oldhw.zh-CN.md)。The original project:
 > [Niko1221/Strata](https://github.com/Niko1221/Strata).
